@@ -14,6 +14,7 @@ boxId = p.loadURDF("r2d2.urdf",cubeStartPos, cubeStartOrientation)
 mass, _, CoG, *_ = p.getDynamicsInfo(boxId, -1)
 print(mass)
 
+##
 
 for i in range (10000):
     p.stepSimulation()
