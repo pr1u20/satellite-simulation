@@ -9,30 +9,44 @@ import matplotlib.pyplot as plt
 
 class SatelliteEnv(gym.Env):
     
-    def __init__(self):
+    def __init__(self, render = True):
 
-        physicsClient = p.connect(p.GUI)#or p.DIRECT for non-graphical version
+        self.render_GUI = render
+
+        if self.render_GUI:
+            physicsClient = p.connect(p.GUI)# p.GUI or p.DIRECT for non-graphical version
+        else:
+            physicsClient = p.connect(p.DIRECT)# p.GUI or p.DIRECT for non-graphical version
+
         p.setAdditionalSearchPath(pybullet_data.getDataPath()) #optionally
         p.setGravity(0,0,0)
         planeId = p.loadURDF("plane.urdf") # creates the square plane in simulation.
-        cubeStartPos = [0,0,1] # define the cube start position
-        cubeStartOrientation = p.getQuaternionFromEuler([0,0,0]) # define start orientation
-        self.boxId = p.loadURDF("cube.urdf",cubeStartPos, cubeStartOrientation) # load the object and set the pos and orientatiomn
+        self.start_position = [0,0,1] # define the cube start position
+        self.start_orientation = p.getQuaternionFromEuler([0,0,0]) # define start orientation
+        self.boxId = p.loadURDF("cube.urdf",self.start_position, self.start_orientation) # load the object and set the pos and orientatiomn
         self.mass, _, self.CoG, *_ = p.getDynamicsInfo(self.boxId, -1) 
-        self.F = 1000 # force applied by each thruster in Newtons
 
+        self.F = 1 # force applied by each thruster in Newtons
         self.fps = 24
-        self.simulation_time = 10# max duration of the simulation before reset
+        self.simulation_time = 8 # max duration of the simulation before reset
         self._end_step = self.fps * self.simulation_time # last timestep of the simulation.
-        self.reward = 0
+        self.dt = 1 / self.fps
+        p.setTimeStep(self.dt) # If timestep is set to different than 240Hz, it affects the solver and other changes need to be made (check pybullet Documentation)
+        self.realTime = True # If True simulation runs in real time. Change to False if training reinforcement learning.
+
+        self.thruster_positions = np.array([[-0.5,0,0], [0.5,0,0]])
+
+        """
         self.action_space = spaces.Dict(
             {
                 "thruster_activation": spaces.Box(0, 1, shape=(2,), dtype=int),
-                "vectoring": spaces.Box(-16, 16, shape=(4,), dtype=int),
+                "vectoring": spaces.Box(-16, 16, shape=(4,), dtype=float),
             }
         )
+        """
+        self.action_space = spaces.Box(-1, 1, shape=(6,), dtype=np.float32)
 
-        self.observation_space = spaces.Box(0, 1, shape=(2,))
+        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(10,))
 
         self.initialize()
     
@@ -41,9 +55,21 @@ class SatelliteEnv(gym.Env):
         self.truncated = False
         self._done = False
         self._current_step = 0
+        self.reward = 0
+        self.target_position = [5,3,2]
+        self.previous_position = self.start_position
+        self.current_position = self.start_position
+        self.current_orientation = self.start_orientation
+        p.resetBasePositionAndOrientation(self.boxId, self.current_position, self.current_orientation)
+        self.actual_positions = []
+        self.target_positions = []
+
+        if self.render_GUI:
+            p.addUserDebugLine(self.current_position, self.target_position, lineColorRGB=[0, 0, 1], lineWidth=2.0, lifeTime=0)
     
     def reset(self, seed = None):
         # Reset the environment and return the initial observation
+        #p.resetSimulation()
         self.initialize()
         
         observation = self._get_obs()
@@ -53,34 +79,50 @@ class SatelliteEnv(gym.Env):
     
     def _get_obs(self):
 
-        cubePos, cubeOrn = p.getBasePositionAndOrientation(self.boxId)
+        self.current_position, current_orientation = p.getBasePositionAndOrientation(self.boxId)
+        # Data type of Spaces.Box is float32.
+        obs = np.concatenate((self.current_position, current_orientation, self.target_position)).astype(np.float32)
         
-        return (cubePos, cubeOrn)
+        return obs
  
     def _get_info(self):
+
+        cubePos, cubeOrn = p.getBasePositionAndOrientation(self.boxId)
+        distance_from_target = np.sqrt(np.sum((np.array(self.target_position) - np.array(self.current_position))**2))
         
-        return {}
+        return {'Current Position (m)': cubePos, "Target Position (m)": self.target_position, "Distance from target": distance_from_target, "Rewards": self.reward}
     
     def step(self, action):
 
-        thruster_0_activated, thruster_1_activated = action['thruster_activation']
-        angle_y_0, angle_z_0, angle_y_1, angle_z_1 = action['vectoring']
+        thruster_0_activated, thruster_1_activated = action[:2]
+        #thruster_0_activated, thruster_1_activated = (1, 0)
+        angle_y_0, angle_z_0, angle_y_1, angle_z_1 = action[2:]*16
+        #angle_y_0, angle_z_0, angle_y_1, angle_z_1 = (15, 0, 15, 0)
 
-        if thruster_0_activated == 1:
-            self.apply_force(force = 10, y_angle = angle_y_0, z_angle = angle_z_0, thruster_number = 0)
-        if thruster_1_activated == 1:
-            self.apply_force(force = 10, y_angle = angle_y_1, z_angle = angle_z_1, thruster_number = 1)
+        self.current_position, _ = p.getBasePositionAndOrientation(self.boxId)
+
+        if thruster_0_activated > 0.01:
+            self.apply_force(force = self.F, y_angle = angle_y_0, z_angle = angle_z_0, thruster_number = 0)
+        if thruster_1_activated > 0.01:
+            self.apply_force(force = self.F, y_angle = angle_y_1, z_angle = angle_z_1, thruster_number = 1)
 
         p.stepSimulation()
 
-        time.sleep(1./self.fps)
+        if self.realTime:
+            time.sleep(1./self.fps)
+
+        # Save the data from the simulation. Positions, target positions, orientations
+        self.data_recorder()
         
-        reward = 0
+        reward = self.reward_calculation()
         self.reward += reward
+
+        self.previous_position = self.current_position
             
         if self._current_step == self._end_step:
             self._done = True
             observation = self._get_obs()
+            print(observation)
             info = self._get_info()
             print(info)
         
@@ -120,13 +162,13 @@ class SatelliteEnv(gym.Env):
         # In the z_direction the opposite_z should have opposite signs for rotation and equal sign for translation.
 
         if thruster_number == 0:
-            self.force_vector = (resultant_x, opposite_y, opposite_z)
-            self.thruster_position = [-0.5,0,0] # Position of thruster with respect to satellite origin.
+            self.force_vector = np.array([resultant_x, opposite_y, opposite_z])
 
         elif thruster_number == 1:
             # Thruster is placed on opposite direction to thruster 1, so the sign of resultant_x is reversed
-            self.force_vector = (-resultant_x, opposite_y, opposite_z)
-            self.thruster_position = [0.5,0,0]
+            self.force_vector = np.array([-resultant_x, opposite_y, opposite_z])
+
+        self.thruster_position = self.thruster_positions[thruster_number] # Position of thruster with respect to satellite origin.
     
     def apply_force(self, force: float, y_angle: float, z_angle: float, thruster_number: int = 0) -> None:
         """Function to apply force by the thruster in a given timestep
@@ -145,8 +187,36 @@ class SatelliteEnv(gym.Env):
 
         p.applyExternalForce(self.boxId, -1, self.force_vector, self.thruster_position, p.LINK_FRAME) # in Newton # WORLD_FRAME p.LINK_FRAME
         #p.applyExternalForce(self.boxId, -1, (-resultant_x, -opposite_y, -opposite_z), [-0.5,0,0], p.LINK_FRAME)
+
+        self.draw_thrust_lines()
+
+    def reward_calculation(self):
+
+        distance_from_target_prev = np.sqrt(np.sum((np.array(self.target_position) - np.array(self.previous_position))**2))
+        distance_from_target = np.sqrt(np.sum((np.array(self.target_position) - np.array(self.current_position))**2))
+
+        #reward =  50000*(distance_from_target_prev - distance_from_target) / distance_from_target
+
+        
+        if distance_from_target <= distance_from_target_prev:
+            reward = 1 / distance_from_target
+        else:
+            reward = 0
+        
+
+        return reward
+
+    def draw_thrust_lines(self):
+        if self.render_GUI:
+            line_lenght = 0.1
+            p.addUserDebugLine(self.thruster_position, self.thruster_position - line_lenght*self.force_vector, lineColorRGB=[1.00,0.25,0.10], lineWidth=4.0, lifeTime=self.dt, parentObjectUniqueId = self.boxId)
     
+    def data_recorder(self):
+        self.actual_positions.append(self.current_position)
+        self.target_positions.append(self.target_position)
+
     def render(self, mode = 'human'):
+        self.render_GUI = True
         return
         
     def plot_training(self):
@@ -171,27 +241,119 @@ class SatelliteEnv(gym.Env):
         
     
     def plot_results(self, name = "performance_report", open_tab = False):
+
+        self.actual_positions = np.array(self.actual_positions)
+        self.target_positions = np.array(self.target_positions)
+
+
+        plt.subplot(2, 2, 1)
+        plt.plot(self.actual_positions[:, 0],  label='Actual')
+        plt.plot(self.target_positions[:, 0], label='Target')
+        plt.title("X positions")
+
+        plt.subplot(2, 2, 2)
+        plt.plot(self.actual_positions[:, 1],  label='Actual')
+        plt.plot(self.target_positions[:, 1], label='Target')
+        plt.title("Y positions")
+
+        plt.subplot(2, 2, 3)
+        plt.plot(self.actual_positions[:, 2],  label='Actual')
+        plt.plot(self.target_positions[:, 2], label='Target')
+        plt.title("Z positions")
+
+        plt.tight_layout()
+        plt.show()
         return
-        
     
     def close(self):
         p.disconnect()
+
+
+class PID():
+	def __init__(self,KP,KI,KD,target = 0):
+		self.kp = KP
+		self.ki = KI
+		self.kd = KD		
+		self.target = target
+		self.error_last = 0
+		self.integral_error = 0
+		self.saturation_max = None
+		self.saturation_min = None
+	def compute(self,pos,dt):
+		error = self.target - pos #compute the error
+		derivative_error = (error - self.error_last) / dt #find the derivative of the error (how the error changes with time)
+		self.integral_error += error * dt #error build up over time
+		output = self.kp*error + self.ki*self.integral_error + self.kd*derivative_error 
+		self.error_last = error
+		if output > self.saturation_max and self.saturation_max is not None:
+			output = self.saturation_max
+		elif output < self.saturation_min and self.saturation_min is not None:
+			output = self.saturation_min
+		return output
+	def setLims(self,min,max):
+		self.saturation_max = max
+		self.saturation_min = min
+
+
+class Strategy():
+    def __init__(self):
+        self.target = 2
+        self.controller = PID(0.7, 0, 0.1, target = self.target)
+        self.controller.setLims(-1, 1)
+        self.dt = 1/240
+        #p.addUserDebugPoints([[self.target, 0, 1]], pointColorsRGB=[[1, 0, 0]], pointSize = 2, lifeTime=0)
+
+    def compute(self, obs):
+
+        current_position = obs[:3]
+        current_orientation = obs[3:7]
+        target_position = obs[7:10]
+
+        self.controller.target = target_position[0]
+
+        output = self.controller.compute(current_position[0], self.dt)
+        print(output)
+
+        action = self.translation_action(output)
+
+        return action
+
+    def translation_action(self, output):
+
+        thruster_0_activated = output
+        thruster_1_activated = - output
+        #thruster_0_activated, thruster_1_activated = (1, 0)
+        angle_y_0, angle_z_0, angle_y_1, angle_z_1 = 0, 0, 0, 0
+
+        action = np.array([thruster_0_activated, thruster_1_activated, angle_y_0, angle_z_0, angle_y_1, angle_z_1])
+
+        return action
+
+
+
+
         
 
 if __name__ == "__main__":
 
     env = SatelliteEnv()
+    strategy = Strategy()
     obs, info = env.reset()
+    print(obs)
     
 
     done = False
     while not done:
         # Choose an actionenv
         #action = strategy(obs)
-        action = env.action_space.sample()
-    
+        #action = env.action_space.sample()
+        action = strategy.compute(obs)
+
+        #print(action)
         # Perform the chosen action in the environment
         obs, reward, done, _, info = env.step(action)
+        #print(reward)
     
     
     env.close()
+    env.plot_results()
