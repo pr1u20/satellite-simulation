@@ -22,13 +22,14 @@ class SatelliteEnv(gym.Env):
         p.setGravity(0,0,0)
         planeId = p.loadURDF("plane.urdf") # creates the square plane in simulation.
         self.start_position = [0,0,1] # define the cube start position
+        self.target_position = [2,3,2]
         self.start_orientation = p.getQuaternionFromEuler([0,0,0]) # define start orientation
         self.boxId = p.loadURDF("cube.urdf",self.start_position, self.start_orientation) # load the object and set the pos and orientatiomn
         self.mass, _, self.CoG, *_ = p.getDynamicsInfo(self.boxId, -1) 
 
         self.F = 1 # force applied by each thruster in Newtons
         self.fps = 24
-        self.simulation_time = 8 # max duration of the simulation before reset
+        self.simulation_time = 20 # max duration of the simulation before reset
         self._end_step = self.fps * self.simulation_time # last timestep of the simulation.
         self.dt = 1 / self.fps
         p.setTimeStep(self.dt) # If timestep is set to different than 240Hz, it affects the solver and other changes need to be made (check pybullet Documentation)
@@ -101,6 +102,7 @@ class SatelliteEnv(gym.Env):
 
         self.current_position, _ = p.getBasePositionAndOrientation(self.boxId)
 
+        # If the output signal from the PID is very small, smaller than 0.01 (for example), the thruster is not activated. This reduces fuel usage, but decreases accuracy.
         if thruster_0_activated > 0.01:
             self.apply_force(force = self.F, y_angle = angle_y_0, z_angle = angle_z_0, thruster_number = 0)
         if thruster_1_activated > 0.01:

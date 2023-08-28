@@ -2,7 +2,7 @@ import pybullet as p
 import numpy as np
 
 from environment import SatelliteEnv
-
+from utils import transform_vector_world_to_satellite
 
 class PID():
 	def __init__(self,KP,KI,KD,target = 0):
@@ -30,11 +30,11 @@ class PID():
 	def setLims(self,min,max):
 		self.saturation_max = max
 		self.saturation_min = min
-
-class Strategy():
+                
+class Strategy_1D():
     def __init__(self):
-        self.target = 2
-        self.controller = PID(0.7, 0, 0.1, target = self.target)
+        # Target is specified in the compute method.
+        self.controller = PID(0.7, 0, 0.1, target = 0)
         self.controller.setLims(-1, 1)
         self.dt = 1/240
         #p.addUserDebugPoints([[self.target, 0, 1]], pointColorsRGB=[[1, 0, 0]], pointSize = 2, lifeTime=0)
@@ -59,7 +59,76 @@ class Strategy():
         thruster_0_activated = output
         thruster_1_activated = - output
         #thruster_0_activated, thruster_1_activated = (1, 0)
-        angle_y_0, angle_z_0, angle_y_1, angle_z_1 = 0, 0, 0, 0
+        angle_y_0 = 0
+        angle_z_0 = 0
+        angle_y_1 = 0
+        angle_z_1 = 0
+
+        action = np.array([thruster_0_activated, thruster_1_activated, angle_y_0, angle_z_0, angle_y_1, angle_z_1])
+
+        return action
+
+class Strategy_2D():
+    def __init__(self):
+        # Target is specified in the compute method.
+        self.controller_x = PID(0.7, 0.0, 0.2, target = 0)
+        self.controller_y = PID(0.7, 0.0, 0.2, target = 0)
+        self.controller_x.setLims(-1, 1)
+        self.controller_y.setLims(-1, 1)
+        self.dt = 1/240
+        #p.addUserDebugPoints([[self.target, 0, 1]], pointColorsRGB=[[1, 0, 0]], pointSize = 2, lifeTime=0)
+
+    def compute(self, obs):
+
+        current_position = obs[:3]
+        current_orientation = obs[3:7]
+        target_position = obs[7:10]
+
+
+        connecting_vector = target_position - current_position
+        # Can also be interpreted as the error between current position and target in satellite reference frame.
+        relative_connecting_vector = transform_vector_world_to_satellite(connecting_vector, current_orientation)
+
+        error = relative_connecting_vector
+
+        self.controller_x.target = error[0]
+        self.controller_y.target = error[1]
+
+
+        # We changed the reference frame to the satellites, so the current position is 0.
+        relative_current_position = [0,0,0]
+
+        output_x = self.controller_x.compute(relative_current_position[0], self.dt)
+        output_y = self.controller_y.compute(relative_current_position[1], self.dt)
+        output = output_x, output_y
+        print(output)
+
+        action = self.translation_action(output)
+
+        return action
+
+    def translation_action(self, output):
+
+        output_x, output_y = output
+
+        if abs(output_x) > abs(output_y):
+
+            thruster_0_activated = output_x
+            thruster_1_activated = - output_x
+            #thruster_0_activated, thruster_1_activated = (1, 0)
+            angle_y_0 = 0
+            angle_z_0 = 0
+            angle_y_1 = 0
+            angle_z_1 = 0
+
+        else:
+            thruster_0_activated = 1
+            thruster_1_activated = 1
+            #thruster_0_activated, thruster_1_activated = (1, 0)
+            angle_y_0 = output_y
+            angle_z_0 = 0
+            angle_y_1 = output_y
+            angle_z_1 = 0
 
         action = np.array([thruster_0_activated, thruster_1_activated, angle_y_0, angle_z_0, angle_y_1, angle_z_1])
 
@@ -69,7 +138,7 @@ class Strategy():
 if __name__ == "__main__":
 	
     env = SatelliteEnv()
-    strategy = Strategy()
+    strategy = Strategy_2D()
     obs, info = env.reset()
     print(obs)
 
